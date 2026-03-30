@@ -1,0 +1,181 @@
+from dataclasses import dataclass, field
+from datetime import datetime, date
+from enum import Enum
+from typing import Optional
+from uuid import uuid4
+
+
+class TaskStatus(Enum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
+@dataclass
+class Task:
+    name: str
+    date_time: datetime
+    task_id: str = field(default_factory=lambda: str(uuid4()))
+    description: str = ""
+    duration_minutes: int = 30
+    location: str = ""
+    is_recurring: bool = False
+    recurrence_rule: str = ""
+    status: TaskStatus = TaskStatus.PENDING
+    pets_involved: list = field(default_factory=list)
+    owners_involved: list = field(default_factory=list)
+
+    def complete(self):
+        """Mark this task as completed."""
+        self.status = TaskStatus.COMPLETED
+
+    def reschedule(self, new_date_time: datetime):
+        """Update the task's scheduled date and time."""
+        self.date_time = new_date_time
+
+    def add_pet(self, pet: "Pet"):
+        """Add a pet to this task's participants."""
+        self.pets_involved.append(pet)
+
+    def add_owner(self, owner: "Owner"):
+        """Add an owner to this task's participants."""
+        self.owners_involved.append(owner)
+
+    def summary(self) -> str:
+        """Return a formatted single-line summary of this task."""
+        status_symbols = {
+            TaskStatus.PENDING:     "[ ]",
+            TaskStatus.IN_PROGRESS: "[~]",
+            TaskStatus.COMPLETED:   "[✓]",
+            TaskStatus.CANCELLED:   "[✗]",
+        }
+        symbol = status_symbols[self.status]
+        time_str = self.date_time.strftime("%I:%M %p")
+        duration = f"{self.duration_minutes} min"
+        location = f"  @ {self.location}" if self.location else ""
+        pets = f"  Pets: {', '.join(p.name for p in self.pets_involved)}" if self.pets_involved else ""
+        return f"  {symbol}  {time_str}  {self.name} ({duration}){location}{pets}"
+
+
+@dataclass
+class Pet:
+    pet_id: str
+    name: str
+    species: str
+    breed: str
+    age: int
+    weight: float = 0.0
+    notes: str = ""
+    tasks: list[Task] = field(default_factory=list)
+
+    def add_task(self, task: Task):
+        """Add a task associated with this pet."""
+        self.tasks.append(task)
+
+    def get_upcoming_tasks(self) -> list[Task]:
+        """Return all tasks scheduled in the future, sorted by date."""
+        now = datetime.now()
+        return sorted(
+            [t for t in self.tasks if t.date_time > now],
+            key=lambda t: t.date_time
+        )
+
+
+@dataclass
+class Owner:
+    owner_id: str
+    name: str
+    pets: list[Pet] = field(default_factory=list)
+
+    def add_pet(self, pet: Pet):
+        """Add a pet to this owner's list of pets."""
+        if any(p.pet_id == pet.pet_id for p in self.pets):
+            raise ValueError(f"Pet with id '{pet.pet_id}' is already registered to this owner.")
+        self.pets.append(pet)
+
+    def remove_pet(self, pet_id: str):
+        """Remove a pet from this owner's list by pet ID."""
+        for i, pet in enumerate(self.pets):
+            if pet.pet_id == pet_id:
+                self.pets.pop(i)
+                return
+        raise ValueError(f"No pet with id '{pet_id}' found for this owner.")
+
+
+@dataclass
+class Scheduler:
+    scheduler_id: str
+    all_tasks: list[Task] = field(default_factory=list)
+
+    def add_task(self, task: Task):
+        """Add a task to the scheduler."""
+        self.all_tasks.append(task)
+
+    def remove_task(self, task_id: str):
+        """Remove a task from the scheduler by task ID."""
+        for i, task in enumerate(self.all_tasks):
+            if task.task_id == task_id:
+                self.all_tasks.pop(i)
+                return
+        raise ValueError(f"No task with id '{task_id}' found in scheduler.")
+
+    def get_tasks_for_day(self, target_date: date) -> list[Task]:
+        """Return all tasks scheduled on the given date, sorted by time."""
+        return sorted(
+            [t for t in self.all_tasks if t.date_time.date() == target_date],
+            key=lambda t: t.date_time
+        )
+
+    def get_tasks_for_month(self, month: int, year: int) -> list[Task]:
+        """Return all tasks in the given month and year, sorted by date."""
+        return sorted(
+            [t for t in self.all_tasks if t.date_time.month == month and t.date_time.year == year],
+            key=lambda t: t.date_time
+        )
+
+    def display_for_day(self, target_date: date):
+        """Print all tasks for a given day in an organized format."""
+        tasks = self.get_tasks_for_day(target_date)
+        header = target_date.strftime("%A, %B %d %Y")
+        print(f"\n=== Tasks for {header} ===")
+        if not tasks:
+            print("  No tasks scheduled.")
+        else:
+            for task in tasks:
+                print(task.summary())
+        print()
+
+    def display_for_month(self, month: int, year: int):
+        """Print all tasks for a given month grouped by day."""
+        tasks = self.get_tasks_for_month(month, year)
+        month_label = date(year, month, 1).strftime("%B %Y")
+        print(f"\n=== Tasks for {month_label} ===")
+        if not tasks:
+            print("  No tasks scheduled.")
+            print()
+            return
+        current_day = None
+        for task in tasks:
+            task_date = task.date_time.date()
+            if task_date != current_day:
+                current_day = task_date
+                print(f"\n  {task_date.strftime('%A, %B %d')}")
+            print(task.summary())
+        print()
+
+    def get_tasks_for_pet(self, pet_id: str) -> list[Task]:
+        """Return all tasks that involve the pet with the given ID."""
+        return sorted(
+            [t for t in self.all_tasks if any(p.pet_id == pet_id for p in t.pets_involved)],
+            key=lambda t: t.date_time
+        )
+
+    def get_overdue_tasks(self) -> list[Task]:
+        """Return all pending/in-progress tasks whose date_time has passed."""
+        now = datetime.now()
+        overdue_statuses = {TaskStatus.PENDING, TaskStatus.IN_PROGRESS}
+        return sorted(
+            [t for t in self.all_tasks if t.date_time < now and t.status in overdue_statuses],
+            key=lambda t: t.date_time
+        )
