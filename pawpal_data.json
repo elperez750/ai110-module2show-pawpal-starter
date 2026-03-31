@@ -1,0 +1,18 @@
+{
+  "owner": {
+    "owner_id": "caf481c5-b229-4076-8ffd-916f87d0ddb1",
+    "name": "Elliott"
+  },
+  "pets": [
+    {
+      "pet_id": "bb7e4ef8-fada-48c4-a055-cbbf839c1ce5",
+      "name": "Mochi",
+      "species": "Dog",
+      "breed": "Shiba Inu",
+      "age": 1,
+      "weight": 0.0,
+      "notes": ""
+    }
+  ],
+  "tasks": []
+}

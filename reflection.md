@@ -35,8 +35,9 @@
 
 **b. Tradeoffs**
 
-- Describe one tradeoff your scheduler makes.
-- Why is that tradeoff reasonable for this scenario?
+The conflict detection algorithm checks whether two tasks' time windows **overlap** (using `start + duration_minutes`) rather than only flagging exact start-time matches. This means a 60-minute walk starting at 9:00 AM will conflict with a feeding at 9:30 AM for the same pet, which is the correct real-world behavior.
+
+The tradeoff is that the algorithm uses a nested loop (O(n²) in the worst case). For a typical pet owner with tens of tasks per day this is negligible, but it would slow down for very large datasets. A more efficient approach (e.g., a sweep-line algorithm) was not implemented because the simpler nested loop is far easier to read and debug, and the scale of this app does not justify the added complexity. The early `break` in the inner loop (possible because `all_tasks` is kept sorted) partially mitigates this by stopping the inner scan as soon as no further overlap is possible.
 
 ---
 

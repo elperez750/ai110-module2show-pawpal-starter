@@ -1,7 +1,8 @@
+import bisect
+from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from enum import Enum
-from typing import Optional
 from uuid import uuid4
 
 
@@ -25,6 +26,31 @@ class Task:
     status: TaskStatus = TaskStatus.PENDING
     pets_involved: list = field(default_factory=list)
     owners_involved: list = field(default_factory=list)
+
+    def __lt__(self, other: "Task") -> bool:
+        return self.date_time < other.date_time
+
+    def next_occurrence(self) -> "Task | None":
+        """Return a new Task for the next occurrence if this task is recurring, else None."""
+        if not self.is_recurring:
+            return None
+        if self.recurrence_rule == "daily":
+            delta = timedelta(days=1)
+        elif self.recurrence_rule == "weekly":
+            delta = timedelta(weeks=1)
+        else:
+            return None
+        return Task(
+            name=self.name,
+            date_time=self.date_time + delta,
+            description=self.description,
+            duration_minutes=self.duration_minutes,
+            location=self.location,
+            is_recurring=self.is_recurring,
+            recurrence_rule=self.recurrence_rule,
+            pets_involved=list(self.pets_involved),
+            owners_involved=list(self.owners_involved),
+        )
 
     def complete(self):
         """Mark this task as completed."""
@@ -107,32 +133,119 @@ class Owner:
 class Scheduler:
     scheduler_id: str
     all_tasks: list[Task] = field(default_factory=list)
+    _date_index: dict = field(
+        default_factory=lambda: defaultdict(list),
+        init=False, repr=False, compare=False
+    )
+    _pet_index: dict = field(
+        default_factory=lambda: defaultdict(list),
+        init=False, repr=False, compare=False
+    )
 
     def add_task(self, task: Task):
-        """Add a task to the scheduler."""
-        self.all_tasks.append(task)
+        """Insert a task in chronological order and update all indexes."""
+        bisect.insort(self.all_tasks, task)
+        self._date_index[task.date_time.date()].append(task)
+        for pet in task.pets_involved:
+            self._pet_index[pet.pet_id].append(task)
 
     def remove_task(self, task_id: str):
-        """Remove a task from the scheduler by task ID."""
+        """Remove a task from the scheduler and all indexes by task ID."""
         for i, task in enumerate(self.all_tasks):
             if task.task_id == task_id:
                 self.all_tasks.pop(i)
+                self._date_index[task.date_time.date()].remove(task)
+                for pet in task.pets_involved:
+                    self._pet_index[pet.pet_id].remove(task)
                 return
         raise ValueError(f"No task with id '{task_id}' found in scheduler.")
 
+    def remove_tasks_for_pet(self, pet_id: str):
+        """Remove all tasks involving a pet and clean up orphaned tasks."""
+        tasks_to_remove = self._pet_index.pop(pet_id, [])
+        for task in tasks_to_remove:
+            task.pets_involved = [p for p in task.pets_involved if p.pet_id != pet_id]
+            self._date_index[task.date_time.date()].remove(task)
+            if not task.pets_involved:
+                self.all_tasks.remove(task)
+
     def get_tasks_for_day(self, target_date: date) -> list[Task]:
         """Return all tasks scheduled on the given date, sorted by time."""
-        return sorted(
-            [t for t in self.all_tasks if t.date_time.date() == target_date],
-            key=lambda t: t.date_time
-        )
+        return sorted(self._date_index[target_date], key=lambda t: t.date_time)
 
     def get_tasks_for_month(self, month: int, year: int) -> list[Task]:
         """Return all tasks in the given month and year, sorted by date."""
-        return sorted(
-            [t for t in self.all_tasks if t.date_time.month == month and t.date_time.year == year],
-            key=lambda t: t.date_time
-        )
+        matching_dates = [
+            d for d in self._date_index if d.month == month and d.year == year
+        ]
+        tasks = [t for d in matching_dates for t in self._date_index[d]]
+        return sorted(tasks, key=lambda t: t.date_time)
+
+    def get_tasks_for_pet(self, pet_id: str) -> list[Task]:
+        """Return all tasks that involve the pet with the given ID."""
+        return sorted(self._pet_index[pet_id], key=lambda t: t.date_time)
+
+    def filter_by_status(self, status: TaskStatus) -> list[Task]:
+        """Return all tasks matching the given status, in chronological order."""
+        return [t for t in self.all_tasks if t.status == status]
+
+    def filter_by_pet_name(self, pet_name: str) -> list[Task]:
+        """Return all tasks involving a pet with the given name, in chronological order."""
+        pet_name_lower = pet_name.lower()
+        return [
+            t for t in self.all_tasks
+            if any(p.name.lower() == pet_name_lower for p in t.pets_involved)
+        ]
+
+    def mark_task_complete(self, task_id: str) -> "Task | None":
+        """Mark a task complete and schedule the next occurrence if it is recurring.
+
+        Returns the newly created Task if one was spawned, otherwise None.
+        """
+        for task in self.all_tasks:
+            if task.task_id == task_id:
+                task.complete()
+                next_task = task.next_occurrence()
+                if next_task is not None:
+                    for pet in next_task.pets_involved:
+                        pet.add_task(next_task)
+                    self.add_task(next_task)
+                return next_task
+        raise ValueError(f"No task with id '{task_id}' found in scheduler.")
+
+    def detect_conflicts(self) -> list[str]:
+        """Return warning messages for tasks that overlap in time for the same pet.
+
+        Overlap is detected when two tasks share a pet and their time windows intersect.
+        """
+        warnings = []
+        tasks = self.all_tasks
+        for i, a in enumerate(tasks):
+            a_end = a.date_time + timedelta(minutes=a.duration_minutes)
+            for b in tasks[i + 1:]:
+                if b.date_time >= a_end:
+                    break  # all_tasks is sorted, no later task can overlap with a
+                shared_pets = [
+                    p.name for p in a.pets_involved
+                    if any(p.pet_id == q.pet_id for q in b.pets_involved)
+                ]
+                if shared_pets:
+                    pets_str = ", ".join(shared_pets)
+                    warnings.append(
+                        f"Conflict: '{a.name}' ({a.date_time.strftime('%I:%M %p')}) and "
+                        f"'{b.name}' ({b.date_time.strftime('%I:%M %p')}) "
+                        f"overlap for {pets_str}."
+                    )
+        return warnings
+
+    def get_overdue_tasks(self) -> list[Task]:
+        """Return all pending/in-progress tasks whose date_time has passed."""
+        now = datetime.now()
+        overdue_statuses = {TaskStatus.PENDING, TaskStatus.IN_PROGRESS}
+        return [
+            t for t in self.all_tasks
+            if t.date_time < now and t.status in overdue_statuses
+        ]
 
     def display_for_day(self, target_date: date):
         """Print all tasks for a given day in an organized format."""
@@ -163,19 +276,3 @@ class Scheduler:
                 print(f"\n  {task_date.strftime('%A, %B %d')}")
             print(task.summary())
         print()
-
-    def get_tasks_for_pet(self, pet_id: str) -> list[Task]:
-        """Return all tasks that involve the pet with the given ID."""
-        return sorted(
-            [t for t in self.all_tasks if any(p.pet_id == pet_id for p in t.pets_involved)],
-            key=lambda t: t.date_time
-        )
-
-    def get_overdue_tasks(self) -> list[Task]:
-        """Return all pending/in-progress tasks whose date_time has passed."""
-        now = datetime.now()
-        overdue_statuses = {TaskStatus.PENDING, TaskStatus.IN_PROGRESS}
-        return sorted(
-            [t for t in self.all_tasks if t.date_time < now and t.status in overdue_statuses],
-            key=lambda t: t.date_time
-        )
