@@ -11,7 +11,18 @@ st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 
 DATA_FILE = Path("pawpal_data.json")
 
-# --- Persistence helpers ---
+STATUS_ICONS = {
+    TaskStatus.PENDING:     "⬜",
+    TaskStatus.IN_PROGRESS: "🔄",
+    TaskStatus.COMPLETED:   "✅",
+    TaskStatus.CANCELLED:   "❌",
+}
+
+STATUS_LABELS = {s: s.value.replace("_", " ").title() for s in TaskStatus}
+
+# ---------------------------------------------------------------------------
+# Persistence
+# ---------------------------------------------------------------------------
 
 def save_state():
     owner: Owner = st.session_state.owner
@@ -51,18 +62,14 @@ def save_state():
     DATA_FILE.write_text(json.dumps(data, indent=2))
 
 
-def load_state() -> tuple[Owner | None, Scheduler]:
+def load_state() -> tuple["Owner | None", Scheduler]:
     if not DATA_FILE.exists():
         return None, Scheduler(scheduler_id="main")
-
     data = json.loads(DATA_FILE.read_text())
-
     owner_data = data.get("owner")
     if not owner_data:
         return None, Scheduler(scheduler_id="main")
-
     owner = Owner(owner_id=owner_data["owner_id"], name=owner_data["name"])
-
     pets_by_id: dict[str, Pet] = {}
     for p in data.get("pets", []):
         pet = Pet(
@@ -76,7 +83,6 @@ def load_state() -> tuple[Owner | None, Scheduler]:
         )
         owner.pets.append(pet)
         pets_by_id[pet.pet_id] = pet
-
     scheduler = Scheduler(scheduler_id="main")
     for t in data.get("tasks", []):
         task = Task(
@@ -96,12 +102,53 @@ def load_state() -> tuple[Owner | None, Scheduler]:
                 task.pets_involved.append(pet)
                 pet.tasks.append(task)
         task.owners_involved.append(owner)
-        scheduler.add_task(task)  # populates _date_index and _pet_index
-
+        scheduler.add_task(task)
     return owner, scheduler
 
 
-# --- Session state init (load from disk on first run) ---
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def render_task_card(task: Task, show_complete_button: bool = False):
+    """Render a single task as a styled card row."""
+    icon = STATUS_ICONS[task.status]
+    pets_str = ", ".join(p.name for p in task.pets_involved)
+    location_str = f"  📍 {task.location}" if task.location else ""
+    recur_str = f"  🔁 {task.recurrence_rule}" if task.is_recurring else ""
+    col_text, col_btn = st.columns([5, 1])
+    with col_text:
+        st.markdown(
+            f"{icon} **{task.date_time.strftime('%I:%M %p')}** — {task.name} "
+            f"({task.duration_minutes} min){location_str}{recur_str}  \n"
+            f"*Pets: {pets_str}* · _{STATUS_LABELS[task.status]}_"
+        )
+    with col_btn:
+        if show_complete_button and task.status not in (TaskStatus.COMPLETED, TaskStatus.CANCELLED):
+            if st.button("✓", key=f"complete_{task.task_id}", help="Mark complete"):
+                next_task = scheduler.mark_task_complete(task.task_id)
+                save_state()
+                if next_task:
+                    st.session_state["_last_recur_msg"] = (
+                        f"'{task.name}' marked complete. "
+                        f"Next occurrence scheduled for {next_task.date_time.strftime('%B %d at %I:%M %p')}."
+                    )
+                st.rerun()
+
+
+def show_conflicts():
+    """Show conflict warnings if any exist."""
+    conflicts = scheduler.detect_conflicts()
+    if conflicts:
+        st.warning(f"**{len(conflicts)} scheduling conflict(s) detected:**")
+        for msg in conflicts:
+            st.markdown(f"- {msg}")
+
+
+# ---------------------------------------------------------------------------
+# Session state init
+# ---------------------------------------------------------------------------
+
 if "scheduler" not in st.session_state:
     loaded_owner, loaded_scheduler = load_state()
     st.session_state.owner = loaded_owner
@@ -109,12 +156,23 @@ if "scheduler" not in st.session_state:
 
 scheduler: Scheduler = st.session_state.scheduler
 
-# --- Header ---
+# ---------------------------------------------------------------------------
+# Header
+# ---------------------------------------------------------------------------
+
 st.title("🐾 PawPal+")
 st.caption("A pet care planner for busy owners.")
+
+# Show recurring task notification if one was just created
+if "_last_recur_msg" in st.session_state:
+    st.success(st.session_state.pop("_last_recur_msg"))
+
 st.divider()
 
-# --- Owner setup ---
+# ---------------------------------------------------------------------------
+# Owner
+# ---------------------------------------------------------------------------
+
 st.subheader("Owner")
 with st.form("owner_form"):
     owner_name = st.text_input(
@@ -141,7 +199,10 @@ if owner is None:
 
 st.success(f"Welcome, **{owner.name}**!")
 
-# --- Pets ---
+# ---------------------------------------------------------------------------
+# Pets
+# ---------------------------------------------------------------------------
+
 st.divider()
 st.subheader("Your Pets")
 
@@ -155,7 +216,6 @@ with st.form("pet_form"):
         breed = st.text_input("Breed", placeholder="Shiba Inu")
     with col4:
         age = st.number_input("Age", min_value=0, max_value=30, value=1)
-
     if st.form_submit_button("Add Pet"):
         if pet_name.strip():
             pet = Pet(
@@ -191,7 +251,10 @@ if owner.pets:
 else:
     st.info("No pets yet. Add one above.")
 
-# --- Add task ---
+# ---------------------------------------------------------------------------
+# Add task
+# ---------------------------------------------------------------------------
+
 if owner.pets:
     st.divider()
     st.subheader("Add a Task")
@@ -202,10 +265,14 @@ if owner.pets:
             task_name = st.text_input("Task name", value="Morning Walk")
             task_date = st.date_input("Date", value=date.today())
             task_time = st.time_input("Time", value=time(9, 0))
-        with col2:
             duration = st.number_input("Duration (minutes)", min_value=1, max_value=480, value=30)
+        with col2:
             location = st.text_input("Location (optional)", placeholder="e.g. Local Park")
             selected_pet_name = st.selectbox("Pet", [p.name for p in owner.pets])
+            is_recurring = st.checkbox("Recurring task")
+            recurrence_rule = ""
+            if is_recurring:
+                recurrence_rule = st.selectbox("Repeats", ["daily", "weekly"])
 
         if st.form_submit_button("Add Task"):
             if task_name.strip():
@@ -215,6 +282,8 @@ if owner.pets:
                     date_time=datetime.combine(task_date, task_time),
                     duration_minutes=int(duration),
                     location=location.strip(),
+                    is_recurring=is_recurring,
+                    recurrence_rule=recurrence_rule if is_recurring else "",
                 )
                 task.add_pet(selected_pet)
                 task.add_owner(owner)
@@ -225,18 +294,22 @@ if owner.pets:
             else:
                 st.warning("Please enter a task name.")
 
-# --- View schedule ---
+# ---------------------------------------------------------------------------
+# Conflict warnings — always visible when tasks exist
+# ---------------------------------------------------------------------------
+
+if scheduler.all_tasks:
+    st.divider()
+    show_conflicts()
+
+# ---------------------------------------------------------------------------
+# Schedule views
+# ---------------------------------------------------------------------------
+
 st.divider()
 st.subheader("Schedule")
 
-STATUS_ICONS = {
-    TaskStatus.PENDING:     "⬜",
-    TaskStatus.IN_PROGRESS: "🔄",
-    TaskStatus.COMPLETED:   "✅",
-    TaskStatus.CANCELLED:   "❌",
-}
-
-day_tab, month_tab = st.tabs(["Day View", "Month View"])
+day_tab, month_tab, filter_tab = st.tabs(["Day View", "Month View", "Filter"])
 
 with day_tab:
     view_date = st.date_input("Date", value=date.today(), key="day_picker")
@@ -245,15 +318,9 @@ with day_tab:
     if not tasks:
         st.info("No tasks scheduled for this day.")
     else:
+        st.caption(f"{len(tasks)} task(s) · sorted chronologically")
         for task in tasks:
-            icon = STATUS_ICONS[task.status]
-            pets_str = ", ".join(p.name for p in task.pets_involved)
-            location_str = f" @ {task.location}" if task.location else ""
-            st.markdown(
-                f"{icon} **{task.date_time.strftime('%I:%M %p')}** — {task.name} "
-                f"({task.duration_minutes} min){location_str}  \n"
-                f"*Pets: {pets_str}*"
-            )
+            render_task_card(task, show_complete_button=True)
 
 with month_tab:
     col1, col2 = st.columns(2)
@@ -271,17 +338,41 @@ with month_tab:
     if not tasks:
         st.info("No tasks scheduled for this month.")
     else:
+        st.caption(f"{len(tasks)} task(s) · grouped by day")
         current_day = None
         for task in tasks:
             task_date = task.date_time.date()
             if task_date != current_day:
                 current_day = task_date
-                st.markdown(f"#### {task_date.strftime('%A, %B %d')}")
-            icon = STATUS_ICONS[task.status]
-            pets_str = ", ".join(p.name for p in task.pets_involved)
-            location_str = f" @ {task.location}" if task.location else ""
-            st.markdown(
-                f"{icon} **{task.date_time.strftime('%I:%M %p')}** — {task.name} "
-                f"({task.duration_minutes} min){location_str}  \n"
-                f"*Pets: {pets_str}*"
-            )
+                st.markdown(f"##### {task_date.strftime('%A, %B %d')}")
+            render_task_card(task, show_complete_button=True)
+
+with filter_tab:
+    st.markdown("#### Filter Tasks")
+    col1, col2 = st.columns(2)
+    with col1:
+        filter_status = st.selectbox(
+            "By status",
+            ["All"] + [STATUS_LABELS[s] for s in TaskStatus],
+        )
+    with col2:
+        pet_names = ["All"] + [p.name for p in owner.pets]
+        filter_pet = st.selectbox("By pet", pet_names)
+
+    # Apply filters
+    if filter_status != "All":
+        chosen_status = next(s for s in TaskStatus if STATUS_LABELS[s] == filter_status)
+        tasks = scheduler.filter_by_status(chosen_status)
+    else:
+        tasks = list(scheduler.all_tasks)
+
+    if filter_pet != "All":
+        pet_name_lower = filter_pet.lower()
+        tasks = [t for t in tasks if any(p.name.lower() == pet_name_lower for p in t.pets_involved)]
+
+    if not tasks:
+        st.info("No tasks match the selected filters.")
+    else:
+        st.caption(f"{len(tasks)} task(s) found")
+        for task in tasks:
+            render_task_card(task, show_complete_button=True)
